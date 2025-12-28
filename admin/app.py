@@ -4,18 +4,46 @@ from datetime import datetime
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
 
-
 def init_db():
     conn = sqlite3.connect("db.sqlite")
     cursor = conn.cursor()
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT UNIQUE,
+            hostname TEXT DEFAULT '',
+            os_arch TEXT DEFAULT '',
+            version TEXT DEFAULT '',
+            status TEXT DEFAULT 'inactive',
+            connected INTEGER DEFAULT 0,
+            last_seen TEXT,
+            aes_key_encrypted TEXT
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS Commands (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id INTEGER DEFAULT 1,  -- اضافه شد
             command_text TEXT NOT NULL,
             arguments TEXT,
             created_at TEXT,
             status TEXT DEFAULT 'pending'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS AgentCommands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER,
+            command_id INTEGER,
+            FOREIGN KEY(agent_id) REFERENCES agents(id),
+            FOREIGN KEY(command_id) REFERENCES Commands(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id INTEGER,
+            result_data TEXT,
+            created_at TEXT
         )
     """)
     conn.commit()
@@ -26,32 +54,43 @@ init_db()
 
 @admin_bp.route('/commands', methods=['POST'])
 def create_command():
-    try:
-        data = request.get_json()
-        command_text = data.get('command_text')
-        arguments = data.get('arguments', '')
+    data = request.get_json() or {}
+    agent_uuid = data.get('agent_uuid')  
+    command_text = data.get('command_text', '').strip()
+    arguments = data.get('arguments', '')
 
-        if not command_text:
-            return jsonify({"status": "error", "message": "command_text الزامی است"}), 400
+    if not agent_uuid or not command_text:
+        return jsonify({"status": "error", "message": "agent_uuid و command_text الزامی است"}), 400
 
-        conn = sqlite3.connect("db.sqlite")
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO Commands (command_text, arguments, created_at, status)
-            VALUES (?, ?, ?, ?)
-        """, (command_text, arguments, datetime.now().isoformat(), 'pending'))
-        conn.commit()
-        new_id = cursor.lastrowid
+    conn = sqlite3.connect("db.sqlite")
+    cursor = conn.cursor()
+
+    
+    cursor.execute("""
+        INSERT INTO Commands (command_text, arguments, created_at, status)
+        VALUES (?, ?, ?, 'pending')
+    """, (command_text, arguments, datetime.utcnow().isoformat()))
+    command_id = cursor.lastrowid
+
+    
+    cursor.execute("SELECT id FROM agents WHERE uuid = ?", (agent_uuid,))
+    row = cursor.fetchone()
+    if not row:
         conn.close()
+        return jsonify({"status": "error", "message": "ایجنت پیدا نشد"}), 404
 
-        return jsonify({
-            "status": "success",
-            "message": "دستور با موفقیت اضافه شد",
-            "command_id": new_id
-        }), 201
+    agent_id = row[0]
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+    
+    cursor.execute("""
+        INSERT INTO AgentCommands (agent_id, command_id)
+        VALUES (?, ?)
+    """, (agent_id, command_id))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "success", "command_id": command_id}), 201
 
 
 @admin_bp.route('/commands', methods=['GET'])
